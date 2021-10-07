@@ -296,6 +296,11 @@ fn v2_decimal_26_nullable() -> Result<()> {
 fn v2_decimal_26_required() -> Result<()> {
     test_pyarrow_integration(8, 2, "basic", false, true)
 }
+
+fn v1_struct() -> Result<()> {
+    test_pyarrow_integration(0, 1, "struct", false, false)
+}
+
 /*#[test]
 fn v2_nested_nested() {
     let _ = test_pyarrow_integration(7, 1, "nested",false, false);
