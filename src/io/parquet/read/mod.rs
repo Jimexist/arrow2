@@ -6,15 +6,17 @@ use std::{
 };
 
 use futures::{AsyncRead, AsyncSeek, Stream};
+use parquet2::read::MutStreamingIterator;
 pub use parquet2::{
     error::ParquetError,
     fallible_streaming_iterator,
     metadata::{ColumnChunkMetaData, ColumnDescriptor, RowGroupMetaData},
     page::{CompressedDataPage, DataPage, DataPageHeader},
     read::{
-        decompress, get_page_iterator as _get_page_iterator, get_page_stream as _get_page_stream,
-        read_metadata as _read_metadata, read_metadata_async as _read_metadata_async,
-        BasicDecompressor, Decompressor, PageFilter, PageIterator,
+        decompress, get_column_iterator, get_page_iterator as _get_page_iterator,
+        get_page_stream as _get_page_stream, read_metadata as _read_metadata,
+        read_metadata_async as _read_metadata_async, BasicDecompressor, Decompressor, PageFilter,
+        PageIterator, State,
     },
     schema::types::{
         LogicalType, ParquetType, PhysicalType, PrimitiveConvertedType,
@@ -45,12 +47,12 @@ pub(crate) use schema::is_type_nullable;
 pub use schema::{get_schema, FileMetaData};
 
 /// Creates a new iterator of compressed pages.
-pub fn get_page_iterator<'b, RR: Read + Seek>(
+pub fn get_page_iterator<R: Read + Seek>(
     column_metadata: &ColumnChunkMetaData,
-    reader: &'b mut RR,
+    reader: R,
     pages_filter: Option<PageFilter>,
     buffer: Vec<u8>,
-) -> Result<PageIterator<'b, RR>> {
+) -> Result<PageIterator<R>> {
     Ok(_get_page_iterator(
         column_metadata,
         reader,
@@ -165,8 +167,52 @@ fn dict_read<
     }
 }
 
+/// Returns an Array built from an iterator of column chunks
+pub fn column_iter_to_array<II, I>(
+    mut columns: I,
+    data_type: DataType,
+    mut buffer: Vec<u8>,
+) -> Result<(Box<dyn Array>, Vec<u8>, Vec<u8>)>
+where
+    II: Iterator<Item = std::result::Result<CompressedDataPage, ParquetError>>,
+    I: MutStreamingIterator<Item = (II, ColumnChunkMetaData), Error = ParquetError>,
+{
+    let mut arrays = vec![];
+    let page_buffer;
+    loop {
+        match columns.advance()? {
+            State::Some(mut new_iter) => {
+                if let Some((pages, metadata)) = new_iter.get() {
+                    let data_type = schema::to_data_type(metadata.descriptor().type_())?.unwrap();
+                    let mut iterator = BasicDecompressor::new(pages, buffer);
+                    let array = page_iter_to_array(&mut iterator, metadata, data_type)?;
+                    buffer = iterator.into_inner();
+                    arrays.push(array)
+                }
+                columns = new_iter;
+            }
+            State::Finished(b) => {
+                page_buffer = b;
+                break;
+            }
+        }
+    }
+
+    use crate::datatypes::PhysicalType::*;
+    Ok(match data_type.to_physical_type() {
+        Null => todo!(),
+        Boolean | Primitive(_) | FixedSizeBinary | Binary | LargeBinary | Utf8 | LargeUtf8
+        | List | LargeList | FixedSizeList | Dictionary(_) => {
+            (arrays.pop().unwrap(), page_buffer, buffer)
+        }
+        Struct => todo!(),
+        Union => todo!(),
+        Map => todo!(),
+    })
+}
+
 /// Converts an iterator of [`DataPage`] into a single [`Array`].
-pub fn page_iter_to_array<I: FallibleStreamingIterator<Item = DataPage, Error = ParquetError>>(
+fn page_iter_to_array<I: FallibleStreamingIterator<Item = DataPage, Error = ParquetError>>(
     iter: &mut I,
     metadata: &ColumnChunkMetaData,
     data_type: DataType,
