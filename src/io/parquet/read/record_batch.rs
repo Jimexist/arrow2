@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     datatypes::{Field, Schema},
-    error::Result,
+    error::{ArrowError, Result},
     record_batch::RecordBatch,
 };
 
@@ -20,6 +20,7 @@ type GroupFilter = Arc<dyn Fn(usize, &RowGroupMetaData) -> bool>;
 pub struct RecordReader<R: Read + Seek> {
     reader: R,
     schema: Arc<Schema>,
+    indices: Vec<usize>,
     buffer: Vec<u8>,
     decompress_buffer: Vec<u8>,
     groups_filter: Option<GroupFilter>,
@@ -44,22 +45,31 @@ impl<R: Read + Seek> RecordReader<R> {
         let schema = get_schema(&metadata)?;
 
         let schema_metadata = schema.metadata;
-        let fields: Vec<Field> = if let Some(projection) = &projection {
+        let (indices, fields): (Vec<usize>, Vec<Field>) = if let Some(projection) = &projection {
             schema
                 .fields
                 .into_iter()
                 .enumerate()
                 .filter_map(|(index, f)| {
                     if projection.iter().any(|&i| i == index) {
-                        Some(f)
+                        Some((index, f))
                     } else {
                         None
                     }
                 })
-                .collect()
+                .unzip()
         } else {
-            schema.fields.into_iter().collect()
+            schema.fields.into_iter().enumerate().unzip()
         };
+
+        if let Some(projection) = &projection {
+            if indices.len() != projection.len() {
+                return Err(ArrowError::InvalidArgumentError(
+                    "While reading parquet, some columns in the projection do not exist in the file"
+                        .to_string(),
+                ));
+            }
+        }
 
         let schema = Arc::new(Schema {
             fields,
@@ -69,6 +79,7 @@ impl<R: Read + Seek> RecordReader<R> {
         Ok(Self {
             reader,
             schema,
+            indices,
             groups_filter,
             pages_filter,
             metadata,
@@ -129,6 +140,7 @@ impl<R: Read + Seek> Iterator for RecordReader<R> {
         let a = schema.fields().iter().enumerate().try_fold(
             (b1, b2, Vec::with_capacity(schema.fields().len())),
             |(b1, b2, mut columns), (field_index, field)| {
+                let field_index = self.indices[field_index]; // project into the original schema
                 let column_iter = get_column_iterator(
                     &mut self.reader,
                     &self.metadata,

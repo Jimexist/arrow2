@@ -166,7 +166,26 @@ fn dict_read<
     }
 }
 
-/// Returns an Array built from an iterator of column chunks
+fn column_datatype(data_type: &DataType, column: usize) -> DataType {
+    use crate::datatypes::PhysicalType::*;
+    match data_type.to_physical_type() {
+        Null | Boolean | Primitive(_) | FixedSizeBinary | Binary | LargeBinary | Utf8
+        | LargeUtf8 | Dictionary(_) | List | LargeList | FixedSizeList => data_type.clone(),
+        Struct => {
+            // todo: this won't work for nested structs because we need to flatten the column ids
+            if let DataType::Struct(v) = data_type {
+                v[column].data_type().clone()
+            } else {
+                unreachable!()
+            }
+        }
+        Union => todo!(),
+        Map => todo!(),
+    }
+}
+
+/// Returns an [`Array`] built from an iterator of column chunks. It also returns
+/// the two buffers used to decompress and deserialize pages (to be re-used).
 #[allow(clippy::type_complexity)]
 pub fn column_iter_to_array<II, I>(
     mut columns: I,
@@ -179,16 +198,19 @@ where
 {
     let mut arrays = vec![];
     let page_buffer;
+    let mut column = 0;
     loop {
         match columns.advance()? {
             State::Some(mut new_iter) => {
+                let data_type = column_datatype(&data_type, column);
                 if let Some((pages, metadata)) = new_iter.get() {
-                    let data_type = schema::to_data_type(metadata.descriptor().type_())?.unwrap();
+                    println!("{:?}", data_type);
                     let mut iterator = BasicDecompressor::new(pages, buffer);
                     let array = page_iter_to_array(&mut iterator, metadata, data_type)?;
                     buffer = iterator.into_inner();
                     arrays.push(array)
                 }
+                column += 1;
                 columns = new_iter;
             }
             State::Finished(b) => {
@@ -200,9 +222,8 @@ where
 
     use crate::datatypes::PhysicalType::*;
     Ok(match data_type.to_physical_type() {
-        Null => todo!(),
-        Boolean | Primitive(_) | FixedSizeBinary | Binary | LargeBinary | Utf8 | LargeUtf8
-        | List | LargeList | FixedSizeList | Dictionary(_) => {
+        Null | Boolean | Primitive(_) | FixedSizeBinary | Binary | LargeBinary | Utf8
+        | LargeUtf8 | List | LargeList | FixedSizeList | Dictionary(_) => {
             (arrays.pop().unwrap(), page_buffer, buffer)
         }
         Struct => todo!(),
