@@ -6,7 +6,6 @@ use std::{
 };
 
 use futures::{AsyncRead, AsyncSeek, Stream};
-use parquet2::read::MutStreamingIterator;
 pub use parquet2::{
     error::ParquetError,
     fallible_streaming_iterator,
@@ -15,8 +14,8 @@ pub use parquet2::{
     read::{
         decompress, get_column_iterator, get_page_iterator as _get_page_iterator,
         get_page_stream as _get_page_stream, read_metadata as _read_metadata,
-        read_metadata_async as _read_metadata_async, BasicDecompressor, Decompressor, PageFilter,
-        PageIterator, State,
+        read_metadata_async as _read_metadata_async, BasicDecompressor, Decompressor,
+        MutStreamingIterator, PageFilter, PageIterator, State,
     },
     schema::types::{
         LogicalType, ParquetType, PhysicalType, PrimitiveConvertedType,
@@ -168,6 +167,7 @@ fn dict_read<
 }
 
 /// Returns an Array built from an iterator of column chunks
+#[allow(clippy::type_complexity)]
 pub fn column_iter_to_array<II, I>(
     mut columns: I,
     data_type: DataType,
@@ -212,7 +212,11 @@ where
 }
 
 /// Converts an iterator of [`DataPage`] into a single [`Array`].
-fn page_iter_to_array<I: FallibleStreamingIterator<Item = DataPage, Error = ParquetError>>(
+///
+/// This only handles types with a single column.
+/// Use [`column_iter_to_array`] to support multi-column arrays.
+/// This is useful to parallelize CPU work across nested types.
+pub fn page_iter_to_array<I: FallibleStreamingIterator<Item = DataPage, Error = ParquetError>>(
     iter: &mut I,
     metadata: &ColumnChunkMetaData,
     data_type: DataType,
